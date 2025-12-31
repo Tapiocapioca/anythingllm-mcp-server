@@ -1,4 +1,5 @@
 import fetch from 'node-fetch';
+import FormData from 'form-data';
 
 export class AnythingLLMClient {
   constructor(baseUrl, apiKey) {
@@ -79,35 +80,76 @@ export class AnythingLLMClient {
     return response.body;
   }
 
+  // FIXED: Upload document to system documents, then add to workspace
+  // AnythingLLM requires a two-step process:
+  // 1. Upload file to /api/v1/document/upload
+  // 2. Add to workspace with /api/v1/workspace/{slug}/update-embeddings
   async uploadDocument(workspaceSlug, documentData) {
     const formData = new FormData();
-    formData.append('file', documentData.file);
-    
-    return this.request(`/api/v1/workspace/${workspaceSlug}/upload`, {
+    formData.append('file', documentData.file, documentData.filename || 'document');
+
+    // Step 1: Upload to system documents
+    const uploadResponse = await fetch(`${this.baseUrl}/api/v1/document/upload`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${this.apiKey}`
       },
       body: formData
     });
+
+    if (!uploadResponse.ok) {
+      const error = await uploadResponse.text();
+      throw new Error(`AnythingLLM upload error: ${uploadResponse.status} - ${error}`);
+    }
+
+    const uploadResult = await uploadResponse.json();
+
+    // Step 2: Add uploaded document to workspace
+    if (uploadResult.documents && uploadResult.documents.length > 0) {
+      const docPaths = uploadResult.documents.map(doc => doc.location);
+      await this.addDocumentsToWorkspace(workspaceSlug, docPaths);
+    }
+
+    return uploadResult;
   }
 
+  // FIXED: List documents - use system endpoint or workspace details
   async listDocuments(workspaceSlug) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/documents`);
+    if (workspaceSlug) {
+      // Get workspace details which includes embedded documents
+      const workspace = await this.request(`/api/v1/workspace/${workspaceSlug}`);
+      return { documents: workspace.workspace?.documents || [] };
+    }
+    // List all system documents
+    return this.request('/api/v1/documents');
   }
 
-  async deleteDocument(workspaceSlug, documentId) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/document/${documentId}`, {
-      method: 'DELETE'
+  // FIXED: Delete document from workspace
+  async deleteDocument(workspaceSlug, documentName) {
+    return this.request(`/api/v1/workspace/${workspaceSlug}/update-embeddings`, {
+      method: 'POST',
+      body: JSON.stringify({
+        deletes: [documentName]
+      })
+    });
+  }
+
+  // Helper: Add documents to workspace by their location paths
+  async addDocumentsToWorkspace(workspaceSlug, documentPaths) {
+    return this.request(`/api/v1/workspace/${workspaceSlug}/update-embeddings`, {
+      method: 'POST',
+      body: JSON.stringify({
+        adds: documentPaths
+      })
     });
   }
 
   async getSystemSettings() {
-    return this.request('/api/v1/system/settings');
+    return this.request('/api/v1/admin/system-preferences');
   }
 
   async updateSystemSettings(settings) {
-    return this.request('/api/v1/system/settings', {
+    return this.request('/api/v1/admin/system-preferences', {
       method: 'POST',
       body: JSON.stringify(settings)
     });
@@ -115,65 +157,103 @@ export class AnythingLLMClient {
 
   // User Management
   async listUsers() {
-    return this.request('/api/v1/users');
+    return this.request('/api/v1/admin/users');
   }
 
   async createUser(userData) {
-    return this.request('/api/v1/users/new', {
+    return this.request('/api/v1/admin/users/new', {
       method: 'POST',
       body: JSON.stringify(userData)
     });
   }
 
   async updateUser(userId, updates) {
-    return this.request(`/api/v1/users/${userId}`, {
+    return this.request(`/api/v1/admin/users/${userId}`, {
       method: 'POST',
       body: JSON.stringify(updates)
     });
   }
 
   async deleteUser(userId) {
-    return this.request(`/api/v1/users/${userId}`, {
+    return this.request(`/api/v1/admin/users/${userId}`, {
       method: 'DELETE'
     });
   }
 
   // API Key Management
   async listApiKeys() {
-    return this.request('/api/v1/api-keys');
+    return this.request('/api/v1/admin/api-keys');
   }
 
-  async createApiKey(name) {
-    return this.request('/api/v1/api-key/new', {
-      method: 'POST',
-      body: JSON.stringify({ name })
+  async createApiKey() {
+    return this.request('/api/v1/admin/generate-api-key', {
+      method: 'POST'
     });
   }
 
   async deleteApiKey(keyId) {
-    return this.request(`/api/v1/api-key/${keyId}`, {
+    return this.request(`/api/v1/admin/delete-api-key/${keyId}`, {
       method: 'DELETE'
     });
   }
 
-  // Embedding Management
+  // FIXED: Embedding Management - two-step process
+  // 1. Create document with raw text via /api/v1/document/raw-text
+  // 2. Add to workspace via /api/v1/workspace/{slug}/update-embeddings
   async embedTextInWorkspace(workspaceSlug, texts) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/embed`, {
-      method: 'POST',
-      body: JSON.stringify({ texts })
-    });
+    const results = [];
+
+    // Process each text as a separate document
+    const textsArray = Array.isArray(texts) ? texts : [texts];
+
+    for (let i = 0; i < textsArray.length; i++) {
+      const text = textsArray[i];
+      const title = `embedded-text-${Date.now()}-${i}`;
+
+      // Step 1: Create document from raw text
+      const docResponse = await this.request('/api/v1/document/raw-text', {
+        method: 'POST',
+        body: JSON.stringify({
+          textContent: text,
+          metadata: {
+            title: title,
+            docSource: 'mcp-embedded'
+          }
+        })
+      });
+
+      results.push(docResponse);
+
+      // Step 2: Add to workspace if document was created
+      if (docResponse.success && docResponse.documents) {
+        const docPaths = docResponse.documents.map(doc => doc.location);
+        await this.addDocumentsToWorkspace(workspaceSlug, docPaths);
+      }
+    }
+
+    return { success: true, documents: results };
   }
 
+  // FIXED: Embed webpage - use document/upload-link then add to workspace
   async embedWebpage(workspaceSlug, url) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/embed-webpage`, {
+    // Step 1: Fetch and process the link
+    const linkResponse = await this.request('/api/v1/document/upload-link', {
       method: 'POST',
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ link: url })
     });
+
+    // Step 2: Add to workspace if successful
+    if (linkResponse.success && linkResponse.documents) {
+      const docPaths = linkResponse.documents.map(doc => doc.location);
+      await this.addDocumentsToWorkspace(workspaceSlug, docPaths);
+    }
+
+    return linkResponse;
   }
 
   // Chat History
   async getWorkspaceChatHistory(workspaceSlug, limit = 100) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/chats?limit=${limit}`);
+    return this.request(`/api/v1/workspace/${workspaceSlug}/chats`);
   }
 
   async clearWorkspaceChatHistory(workspaceSlug) {
@@ -184,98 +264,137 @@ export class AnythingLLMClient {
 
   // System Information
   async getSystemInfo() {
-    return this.request('/api/v1/system');
+    return this.request('/api/v1/system/env-dump');
   }
 
   async getSystemStats() {
-    return this.request('/api/v1/system/stats');
+    return this.request('/api/v1/system/system-vectors');
   }
 
-  // LLM Provider Management
+  // LLM Provider Management - Note: These are admin endpoints
   async listLLMProviders() {
-    return this.request('/api/v1/system/llm-providers');
+    // AnythingLLM doesn't have a direct endpoint for this,
+    // but we can get current config from system preferences
+    return this.request('/api/v1/admin/system-preferences');
   }
 
   async updateLLMProvider(provider, config) {
-    return this.request('/api/v1/system/llm-provider', {
+    return this.request('/api/v1/admin/system-preferences', {
       method: 'POST',
-      body: JSON.stringify({ provider, ...config })
+      body: JSON.stringify({
+        LLMProvider: provider,
+        ...config
+      })
     });
   }
 
   // Vector Database Management
   async getVectorDatabaseInfo() {
-    return this.request('/api/v1/system/vector-database');
+    return this.request('/api/v1/admin/system-preferences');
   }
 
   async updateVectorDatabase(config) {
-    return this.request('/api/v1/system/vector-database', {
+    return this.request('/api/v1/admin/system-preferences', {
       method: 'POST',
-      body: JSON.stringify(config)
+      body: JSON.stringify({
+        VectorDB: config.provider,
+        ...config
+      })
     });
   }
 
-  // Workspace Settings
+  // Workspace Settings - get workspace details
   async getWorkspaceSettings(workspaceSlug) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/settings`);
+    return this.request(`/api/v1/workspace/${workspaceSlug}`);
   }
 
   async updateWorkspaceSettings(workspaceSlug, settings) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/settings`, {
+    return this.request(`/api/v1/workspace/${workspaceSlug}/update`, {
       method: 'POST',
       body: JSON.stringify(settings)
     });
   }
 
-  // Document Processing
+  // Document Processing via URL
   async processDocument(workspaceSlug, documentUrl) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/process-document`, {
-      method: 'POST',
-      body: JSON.stringify({ url: documentUrl })
-    });
+    return this.embedWebpage(workspaceSlug, documentUrl);
   }
 
+  // Get document vectors - through workspace vector search
   async getDocumentVectors(workspaceSlug, documentId) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/document/${documentId}/vectors`);
-  }
-
-  // Search
-  async searchWorkspace(workspaceSlug, query, limit = 10) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/search`, {
+    // AnythingLLM doesn't expose individual document vectors directly
+    // Use vector search as a workaround
+    return this.request(`/api/v1/workspace/${workspaceSlug}/vector-search`, {
       method: 'POST',
-      body: JSON.stringify({ query, limit })
+      body: JSON.stringify({
+        query: '',
+        topK: 100
+      })
     });
   }
 
-  // Agents (if supported)
+  // Search - use vector search endpoint
+  async searchWorkspace(workspaceSlug, query, limit = 10) {
+    return this.request(`/api/v1/workspace/${workspaceSlug}/vector-search`, {
+      method: 'POST',
+      body: JSON.stringify({
+        query: query,
+        topK: limit
+      })
+    });
+  }
+
+  // Agents - AnythingLLM has workspace agents, not standalone
   async listAgents() {
-    return this.request('/api/v1/agents');
+    // Agents are per-workspace in AnythingLLM
+    // Return workspace list with agent config
+    const workspaces = await this.listWorkspaces();
+    return {
+      message: 'Agents are configured per-workspace in AnythingLLM',
+      workspaces: workspaces
+    };
   }
 
   async createAgent(agentData) {
-    return this.request('/api/v1/agents/new', {
+    // Agent creation is done via workspace settings
+    if (!agentData.workspaceSlug) {
+      throw new Error('workspaceSlug is required to create an agent');
+    }
+    return this.request(`/api/v1/workspace/${agentData.workspaceSlug}/update`, {
       method: 'POST',
-      body: JSON.stringify(agentData)
+      body: JSON.stringify({
+        agentProvider: agentData.provider || 'none',
+        agentModel: agentData.model,
+        ...agentData
+      })
     });
   }
 
   async updateAgent(agentId, updates) {
-    return this.request(`/api/v1/agents/${agentId}`, {
+    // agentId should be the workspace slug
+    return this.request(`/api/v1/workspace/${agentId}/update`, {
       method: 'POST',
       body: JSON.stringify(updates)
     });
   }
 
   async deleteAgent(agentId) {
-    return this.request(`/api/v1/agents/${agentId}`, {
-      method: 'DELETE'
+    // Disable agent on workspace
+    return this.request(`/api/v1/workspace/${agentId}/update`, {
+      method: 'POST',
+      body: JSON.stringify({ agentProvider: 'none' })
     });
   }
 
   async invokeAgent(agentId, input) {
-    return this.request(`/api/v1/agents/${agentId}/invoke`, {
+    // Use chat with agent mode
+    return this.request(`/api/v1/workspace/${agentId}/chat`, {
       method: 'POST',
-      body: JSON.stringify({ input })
+      body: JSON.stringify({
+        message: input,
+        mode: 'chat',
+        attachments: []
+      })
     });
   }
 }
