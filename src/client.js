@@ -125,12 +125,21 @@ export class AnythingLLMClient {
   }
 
   // FIXED: Delete document from workspace
+  // The documentName can be docId, filename, or full docpath
   async deleteDocument(workspaceSlug, documentName) {
+    const workspace = await this.getWorkspace(workspaceSlug);
+    const docs = workspace.workspace?.documents || [];
+    let docPath = documentName;
+    const matchedDoc = docs.find(d =>
+      d.docId === documentName ||
+      d.filename === documentName ||
+      d.docpath === documentName ||
+      d.docpath?.includes(documentName)
+    );
+    if (matchedDoc) { docPath = matchedDoc.docpath; }
     return this.request(`/api/v1/workspace/${workspaceSlug}/update-embeddings`, {
       method: 'POST',
-      body: JSON.stringify({
-        deletes: [documentName]
-      })
+      body: JSON.stringify({ deletes: [docPath] })
     });
   }
 
@@ -256,10 +265,12 @@ export class AnythingLLMClient {
     return this.request(`/api/v1/workspace/${workspaceSlug}/chats`);
   }
 
+  // NOTE: AnythingLLM API v1 does not have endpoint to clear chat history
   async clearWorkspaceChatHistory(workspaceSlug) {
-    return this.request(`/api/v1/workspace/${workspaceSlug}/chats`, {
-      method: 'DELETE'
-    });
+    throw new Error(
+      'AnythingLLM API v1 does not support clearing chat history. ' +
+      'Workaround: Delete and recreate the workspace.'
+    );
   }
 
   // System Information
