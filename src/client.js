@@ -128,7 +128,9 @@ export class AnythingLLMClient {
   // The documentName can be docId, filename, or full docpath
   async deleteDocument(workspaceSlug, documentName) {
     const workspace = await this.getWorkspace(workspaceSlug);
-    const docs = workspace.workspace?.documents || [];
+    // Note: workspace.workspace can be an array or object depending on API version
+    const wsData = Array.isArray(workspace.workspace) ? workspace.workspace[0] : workspace.workspace;
+    const docs = wsData?.documents || [];
     let docPath = documentName;
     const matchedDoc = docs.find(d =>
       d.docId === documentName ||
