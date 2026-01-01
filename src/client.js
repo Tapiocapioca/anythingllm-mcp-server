@@ -52,9 +52,20 @@ export class AnythingLLMClient {
   }
 
   async deleteWorkspace(slug) {
-    return this.request(`/api/v1/workspace/${slug}`, {
-      method: 'DELETE'
+    const url = `${this.baseUrl}/api/v1/workspace/${slug}`;
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: this.headers
     });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`AnythingLLM API error: ${response.status} - ${error}`);
+    }
+
+    // AnythingLLM returns plain text "OK" instead of JSON for delete
+    const text = await response.text();
+    return { success: text === 'OK', message: text };
   }
 
   async chatWithWorkspace(slug, message, mode = 'chat') {
@@ -118,7 +129,9 @@ export class AnythingLLMClient {
     if (workspaceSlug) {
       // Get workspace details which includes embedded documents
       const workspace = await this.request(`/api/v1/workspace/${workspaceSlug}`);
-      return { documents: workspace.workspace?.documents || [] };
+      // Note: workspace.workspace can be an array or object depending on API version
+      const wsData = Array.isArray(workspace.workspace) ? workspace.workspace[0] : workspace.workspace;
+      return { documents: wsData?.documents || [] };
     }
     // List all system documents
     return this.request('/api/v1/documents');
